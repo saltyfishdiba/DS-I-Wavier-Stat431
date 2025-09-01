@@ -1,0 +1,133 @@
+
+---
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r}
+library(rjags)
+library(coda)
+
+#
+file_path <- "D:/Stat431/ObesityDataSet_raw_and_data_sinthetic.csv"
+data <- read.csv(file_path, stringsAsFactors = FALSE)
+
+#map ordered categories to 0..6
+data$NObeyesdad <- as.numeric(factor(data$NObeyesdad,
+                                     levels = sort(unique(data$NObeyesdad)))) - 1
+
+# make sure the needed columns exist and are numeric/binary as intended
+# FAVC: "yes"/"no" -> 1/0
+if (!is.numeric(data$FAVC)) {
+  data$FAVC <- as.numeric(tolower(trimws(data$FAVC)) == "yes")
+}
+
+# ordered categorical drinking frequency -> 0..3
+calc_levels <- c("no", "Sometimes", "Frequently", "Always")
+data$CALC <- as.numeric(factor(data$CALC, levels = calc_levels)) - 1
+
+# physical activity frequency should be numeric; coerce if it came in as character
+if (!is.numeric(data$FAF)) {
+  data$FAF <- as.numeric(data$FAF)
+}
+
+data$AgeGroup <- cut(
+  data$Age,
+  breaks = c(0, 21, 30, 45, 61),
+  labels = FALSE,
+  include.lowest = TRUE,
+  right = TRUE
+)
+
+# Drop rows with any NAs in required fields to keep JAGS happy
+needed <- c("NObeyesdad","AgeGroup","FAVC","FAF","CALC")
+data <- data[stats::complete.cases(data[, needed]), ]
+
+#JAGS Model
+jags_model <- "
+model {
+  # Hyperpriors
+  mu_0 ~ dnorm(0, 0.01)
+  tau_0 ~ dgamma(1, 0.01)
+
+  # Group-level means for 4 age groups
+  for (j in 1:4) {
+    mu_age[j] ~ dnorm(mu_0, tau_0)
+  }
+
+  # Priors for coefficients
+  beta_favc ~ dnorm(0, 0.01)
+  beta_faf  ~ dnorm(0, 0.01)
+  beta_calc ~ dnorm(0, 0.01)
+
+  # Residual precision
+  tau ~ dgamma(1, 0.01)
+  sigma <- 1 / sqrt(tau)
+
+  # Likelihood
+  for (i in 1:N) {
+    mu[i] <- mu_age[AgeGroup[i]] +
+             beta_favc * FAVC[i] +
+             beta_faf  * FAF[i]  +
+             beta_calc * CALC[i]
+    NObeyesdad[i] ~ dnorm(mu[i], tau)
+  }
+}
+"
+
+#Data for JAGS
+jags_data <- list(
+  NObeyesdad = data$NObeyesdad,
+  AgeGroup   = as.integer(data$AgeGroup),
+  FAVC       = as.numeric(data$FAVC),
+  FAF        = as.numeric(data$FAF),
+  CALC       = as.numeric(data$CALC),
+  N          = nrow(data)
+)
+
+# Initial Values
+inits <- list(
+  list(mu_0 = 0, tau_0 = 1, beta_favc = 0,   beta_faf = 0,   beta_calc = 0,   tau = 1),
+  list(mu_0 = 1, tau_0 = 2, beta_favc = 0.1, beta_faf = 0.1, beta_calc = 0.1, tau = 2)
+)
+
+#Run JAGS
+jags <- jags.model(
+  textConnection(jags_model),
+  data = jags_data,
+  inits = inits,
+  n.chains = 2,
+  quiet = TRUE
+)
+
+update(jags, 2000, progress.bar = "none")
+
+samples <- coda.samples(
+  jags,
+  variable.names = c("mu_0", "mu_age", "beta_favc", "beta_faf", "beta_calc", "sigma"),
+  n.iter = 5000,
+  progress.bar = "none"
+)
+
+print(summary(samples))
+
+# Ensure margins are small enough even if the device is tight
+oldpar <- par(no.readonly = TRUE)
+on.exit(par(oldpar), add = TRUE)
+par(mar = c(4, 4, 1, 1))
+
+plot(samples)               
+gelman.diag(samples, autoburnin = FALSE)
+effectiveSize(samples)
+#Save Posterior
+graphics.off()               
+png("posterior_trace_plot_updated.png", width = 1200, height = 800)
+par(mar = c(4, 4, 1, 1))
+plot(samples)
+dev.off()
+
+cat("Saved: posterior_trace_plot_updated.png\n")
+
+```
